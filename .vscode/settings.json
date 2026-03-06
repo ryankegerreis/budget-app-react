@@ -1,5 +1,14 @@
 {
   "chat.tools.terminal.autoApprove": {
-    "npm audit": true
+    "npm audit": true,
+    "npm install": true,
+    "/^node -v && npm -v$/": {
+      "approve": true,
+      "matchCommandLine": true
+    },
+    "/^git status --porcelain; git add \\.nvmrc; git commit -m \"Add \\.nvmrc pinned to Node 25\\.8\\.0\" \\|\\| true; git rev-parse --short HEAD$/": {
+      "approve": true,
+      "matchCommandLine": true
+    }
   }
 }
