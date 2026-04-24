@@ -1,0 +1,376 @@
+name: Dependabot Jira Sync
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: dependabot-jira-${{ github.repository }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  sync-to-jira:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch Dependabot metadata
+        id: dependabot-metadata
+        uses: dependabot/fetch-metadata@v2
+        continue-on-error: true
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create or update Jira issue
+        shell: bash
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
+          JIRA_ISSUE_TYPE: ${{ vars.JIRA_ISSUE_TYPE }}
+
+          GH_EVENT_NAME: ${{ github.event_name }}
+          GH_ACTION: ${{ github.event.action }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_REPO_NAME: ${{ github.event.repository.name }}
+          GH_PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_PR_TITLE: ${{ github.event.pull_request.title }}
+          GH_PR_BODY: ${{ github.event.pull_request.body }}
+          GH_PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+
+          META_DEPENDENCY_NAMES: ${{ steps.dependabot-metadata.outputs.dependency-names }}
+          META_DEPENDENCY_TYPE: ${{ steps.dependabot-metadata.outputs.dependency-type }}
+          META_UPDATE_TYPE: ${{ steps.dependabot-metadata.outputs.update-type }}
+          META_UPDATED_DEPENDENCIES_JSON: ${{ steps.dependabot-metadata.outputs.updated-dependencies-json }}
+        run: |
+          set -euo pipefail
+
+          for required in JIRA_BASE_URL JIRA_EMAIL JIRA_API_TOKEN JIRA_PROJECT_KEY; do
+            if [ -z "${!required:-}" ]; then
+              echo "::error::Missing required secret/env: ${required}"
+              exit 1
+            fi
+          done
+
+          sanitize_multiline() {
+            printf '%s' "$1" | LC_ALL=C tr '\000-\010\013\014\016-\037' ' '
+          }
+
+          jira_api() {
+            local method="$1"
+            local url="$2"
+            local data_file="${3:-}"
+            local response_file
+            local http_code
+
+            response_file="$(mktemp)"
+
+            if [ -n "${data_file}" ]; then
+              http_code="$(curl -sS -o "${response_file}" -w "%{http_code}" \
+                -X "${method}" "${url}" \
+                -H "Authorization: Basic ${JIRA_AUTH_B64}" \
+                -H "Accept: application/json" \
+                -H "Content-Type: application/json" \
+                --data @"${data_file}")"
+            else
+              http_code="$(curl -sS -o "${response_file}" -w "%{http_code}" \
+                -X "${method}" "${url}" \
+                -H "Authorization: Basic ${JIRA_AUTH_B64}" \
+                -H "Accept: application/json" \
+                -H "Content-Type: application/json")"
+            fi
+
+            if [ "${http_code}" -lt 200 ] || [ "${http_code}" -ge 300 ]; then
+              echo "::error::Jira API request failed (${method} ${url}) with HTTP ${http_code}"
+              echo "::error::$(cat "${response_file}")"
+              exit 1
+            fi
+
+            cat "${response_file}"
+          }
+
+          JIRA_BASE_URL="${JIRA_BASE_URL%/}"
+          ISSUE_TYPE="${JIRA_ISSUE_TYPE:-Task}"
+
+          DEPENDENCY_NAMES="${META_DEPENDENCY_NAMES:-}"
+          if [ -z "${DEPENDENCY_NAMES}" ]; then
+            DEPENDENCY_NAMES="${GH_PR_TITLE:-Dependabot dependency update}"
+            echo "::warning::dependabot/fetch-metadata returned empty dependency-names; falling back to PR title."
+          fi
+
+          DEPENDENCY_TYPE="${META_DEPENDENCY_TYPE:-unknown}"
+          UPDATE_TYPE="${META_UPDATE_TYPE:-unknown}"
+
+          UPDATED_DEPENDENCIES_JSON='[]'
+          if [ -n "${META_UPDATED_DEPENDENCIES_JSON:-}" ]; then
+            if parsed_deps="$(printf '%s' "${META_UPDATED_DEPENDENCIES_JSON}" | jq -c '
+              if type == "array" then .
+              elif type == "object" and has("updated-dependencies") then .["updated-dependencies"]
+              else []
+              end
+            ' 2>/dev/null)"; then
+              UPDATED_DEPENDENCIES_JSON="${parsed_deps}"
+            else
+              echo "::warning::Unable to parse updated-dependencies-json; continuing without per-package JSON details."
+            fi
+          fi
+
+          IS_SECURITY_UPDATE="false"
+          if printf '%s %s' "${GH_PR_TITLE:-}" "${GH_PR_BODY:-}" | grep -Eiq '(security|vulnerab|cve-)'; then
+            IS_SECURITY_UPDATE="true"
+          fi
+
+          PRIORITY="Medium"
+          PANEL_TYPE="warning"
+          TRIAGE_MESSAGE="🟡 Medium risk — update type unavailable. Review changelogs before merging."
+
+          case "${UPDATE_TYPE}" in
+            *semver-major*)
+              PRIORITY="High"
+              PANEL_TYPE="error"
+              TRIAGE_MESSAGE="🔴 High risk — major updates may contain breaking changes. Review changelogs and test thoroughly."
+              ;;
+            *semver-minor*)
+              PRIORITY="Medium"
+              PANEL_TYPE="warning"
+              TRIAGE_MESSAGE="🟡 Medium risk — minor updates add features. Check changelogs for breaking changes."
+              ;;
+            *semver-patch*)
+              PRIORITY="Low"
+              PANEL_TYPE="info"
+              TRIAGE_MESSAGE="🟢 Low risk — patch updates are bug fixes only. Safe to merge after CI passes."
+              ;;
+          esac
+
+          if [ "${IS_SECURITY_UPDATE}" = "true" ]; then
+            PRIORITY="High"
+            PANEL_TYPE="error"
+            TRIAGE_MESSAGE="🔴 High priority — this appears to be a security-related dependency update. Review and merge promptly after validation."
+          fi
+
+          UPDATE_LABEL="$(printf '%s' "${UPDATE_TYPE}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+|-+$//g')"
+          if [ -z "${UPDATE_LABEL}" ]; then
+            UPDATE_LABEL="update-unknown"
+          fi
+
+          PR_BODY_SAFE="$(sanitize_multiline "${GH_PR_BODY:-}")"
+          if [ -z "${PR_BODY_SAFE}" ]; then
+            PR_BODY_SAFE="No PR body was provided by Dependabot."
+          fi
+
+          TRUNCATION_NOTE=""
+          PR_BODY_LIMIT=25000
+          if [ "${#PR_BODY_SAFE}" -gt "${PR_BODY_LIMIT}" ]; then
+            ORIGINAL_LEN="${#PR_BODY_SAFE}"
+            PR_BODY_SAFE="${PR_BODY_SAFE:0:${PR_BODY_LIMIT}}"
+            TRUNCATION_NOTE="Dependabot PR body was truncated from ${ORIGINAL_LEN} to ${PR_BODY_LIMIT} characters to stay within Jira ADF limits."
+          fi
+
+          SUMMARY="🤖 Dependabot [${UPDATE_TYPE}]: ${GH_REPO_NAME} — ${DEPENDENCY_NAMES} (PR #${GH_PR_NUMBER})"
+          SUMMARY="$(printf '%s' "${SUMMARY}" | tr '\r\n' ' ' | sed -E 's/[[:space:]]+/ /g')"
+          if [ "${#SUMMARY}" -gt 255 ]; then
+            SUMMARY="${SUMMARY:0:252}..."
+          fi
+
+          if [ "${IS_SECURITY_UPDATE}" = "true" ]; then
+            LABELS_JSON="$(jq -cn --arg update_label "${UPDATE_LABEL}" '["dependabot", "security", "automated", $update_label] | unique')"
+          else
+            LABELS_JSON="$(jq -cn --arg update_label "${UPDATE_LABEL}" '["dependabot", "automated", $update_label] | unique')"
+          fi
+
+          DESCRIPTION_JSON="$(jq -n \
+            --arg repo "${GH_REPOSITORY}" \
+            --arg pr_url "${GH_PR_URL}" \
+            --arg pr_number "${GH_PR_NUMBER}" \
+            --arg branch "${GH_PR_BRANCH}" \
+            --arg update_type "${UPDATE_TYPE}" \
+            --arg dependency_type "${DEPENDENCY_TYPE}" \
+            --arg dependency_names "${DEPENDENCY_NAMES}" \
+            --arg panel_type "${PANEL_TYPE}" \
+            --arg triage_message "${TRIAGE_MESSAGE}" \
+            --arg pr_body "${PR_BODY_SAFE}" \
+            --arg truncation_note "${TRUNCATION_NOTE}" \
+            --argjson dependencies "${UPDATED_DEPENDENCIES_JSON}" '
+              def text($value): {"type":"text","text":$value};
+              def paragraph($content): {"type":"paragraph","content":$content};
+              def heading2($value): {"type":"heading","attrs":{"level":2},"content":[text($value)]};
+              def list_item($content): {"type":"listItem","content":[paragraph($content)]};
+              def strong_text($value): {"type":"text","text":$value,"marks":[{"type":"strong"}]};
+              def link_text($label; $href): {"type":"text","text":$label,"marks":[{"type":"link","attrs":{"href":$href}}]};
+              def metadata_item($label; $value): list_item([strong_text($label + ": "), text($value)]);
+              def package_item($pkg):
+                list_item([
+                  text(
+                    (($pkg["dependency-name"] // $pkg.name // "unknown-package")
+                      + ": "
+                      + ($pkg["previous-version"] // $pkg.previous_version // $pkg.previousVersion // "?")
+                      + " → "
+                      + ($pkg["new-version"] // $pkg.new_version // $pkg.newVersion // "?")
+                      + " ("
+                      + ($pkg["update-type"] // $pkg.update_type // $pkg.updateType // "unknown")
+                      + ")")
+                  )
+                ]);
+
+              {
+                "type": "doc",
+                "version": 1,
+                "content": (
+                  [
+                    heading2("Dependency Update Summary"),
+                    {
+                      "type": "bulletList",
+                      "content": [
+                        metadata_item("Repository"; $repo),
+                        list_item([strong_text("PR: "), link_text("PR #" + $pr_number; $pr_url)]),
+                        metadata_item("Branch"; $branch),
+                        metadata_item("Update type"; $update_type),
+                        metadata_item("Dependency type"; $dependency_type),
+                        metadata_item("Packages updated"; $dependency_names)
+                      ]
+                    },
+                    heading2("Triage Recommendation"),
+                    {
+                      "type": "panel",
+                      "attrs": {"panelType": $panel_type},
+                      "content": [paragraph([text($triage_message)])]
+                    },
+                    heading2("Per-Package Details")
+                  ]
+                  + (
+                    if ($dependencies | type == "array" and ($dependencies | length) > 0) then
+                      [{"type": "bulletList", "content": ($dependencies | map(package_item(.)))}]
+                    else
+                      [paragraph([text("No structured package details were available from dependabot/fetch-metadata.")])]
+                    end
+                  )
+                  + [heading2("Dependabot PR Body")]
+                  + (
+                    if ($truncation_note | length) > 0 then
+                      [paragraph([text($truncation_note)])]
+                    else
+                      []
+                    end
+                  )
+                  + [
+                    {"type": "codeBlock", "attrs": {"language": "markdown"}, "content": [text($pr_body)]},
+                    heading2("Review Action"),
+                    paragraph([link_text("Open Pull Request in GitHub"; $pr_url)])
+                  ]
+                )
+              }
+            ')"
+
+          DEPENDENCY_LIST_FOR_COMMENT="$(printf '%s' "${UPDATED_DEPENDENCIES_JSON}" | jq -r '
+            if type == "array" and length > 0 then
+              map(
+                ((.["dependency-name"] // .name // "unknown-package")
+                  + " "
+                  + (.["previous-version"] // .previous_version // .previousVersion // "?")
+                  + " → "
+                  + (.["new-version"] // .new_version // .newVersion // "?"))
+              ) | join(", ")
+            else
+              empty
+            end
+          ')"
+          if [ -z "${DEPENDENCY_LIST_FOR_COMMENT}" ]; then
+            DEPENDENCY_LIST_FOR_COMMENT="${DEPENDENCY_NAMES}"
+          fi
+
+          JIRA_AUTH_B64="$(printf '%s:%s' "${JIRA_EMAIL}" "${JIRA_API_TOKEN}" | base64 | tr -d '\n')"
+
+          JQL="summary ~ \"PR #${GH_PR_NUMBER}\" AND summary ~ \"${GH_REPO_NAME}\" AND labels = \"dependabot\" AND project = \"${JIRA_PROJECT_KEY}\""
+          ENCODED_JQL="$(jq -rn --arg q "${JQL}" '$q | @uri')"
+
+          SEARCH_RESPONSE="$(jira_api GET "${JIRA_BASE_URL}/rest/api/3/search?jql=${ENCODED_JQL}&maxResults=1&fields=key,summary")"
+          EXISTING_ISSUE_KEY="$(printf '%s' "${SEARCH_RESPONSE}" | jq -r '.issues[0].key // empty')"
+
+          if [ -n "${EXISTING_ISSUE_KEY}" ]; then
+            if [ "${GH_ACTION}" = "synchronize" ]; then
+              COMMENT_PAYLOAD_FILE="$(mktemp)"
+              jq -n \
+                --arg pr_url "${GH_PR_URL}" \
+                --arg pr_number "${GH_PR_NUMBER}" \
+                --arg dependency_names "${DEPENDENCY_LIST_FOR_COMMENT}" \
+                --arg update_type "${UPDATE_TYPE}" \
+                '{
+                  "body": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {"type": "text", "text": "Dependabot PR update detected (synchronize event)."}
+                        ]
+                      },
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {"type": "text", "text": "PR: "},
+                          {"type": "text", "text": ("PR #" + $pr_number), "marks": [{"type": "link", "attrs": {"href": $pr_url}}]}
+                        ]
+                      },
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {"type": "text", "text": "Update type: "},
+                          {"type": "text", "text": $update_type, "marks": [{"type": "code"}]}
+                        ]
+                      },
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {"type": "text", "text": "Refreshed dependencies: "},
+                          {"type": "text", "text": $dependency_names}
+                        ]
+                      }
+                    ]
+                  }
+                }' > "${COMMENT_PAYLOAD_FILE}"
+
+              jira_api POST "${JIRA_BASE_URL}/rest/api/3/issue/${EXISTING_ISSUE_KEY}/comment" "${COMMENT_PAYLOAD_FILE}" > /dev/null
+              echo "Added update comment to existing Jira issue ${EXISTING_ISSUE_KEY}."
+              exit 0
+            fi
+
+            echo "Jira issue ${EXISTING_ISSUE_KEY} already exists for this PR. Skipping new issue creation."
+            exit 0
+          fi
+
+          ISSUE_PAYLOAD_FILE="$(mktemp)"
+          jq -n \
+            --arg project_key "${JIRA_PROJECT_KEY}" \
+            --arg summary "${SUMMARY}" \
+            --arg issue_type "${ISSUE_TYPE}" \
+            --arg priority "${PRIORITY}" \
+            --argjson labels "${LABELS_JSON}" \
+            --argjson description "${DESCRIPTION_JSON}" \
+            '{
+              "fields": {
+                "project": {"key": $project_key},
+                "summary": $summary,
+                "issuetype": {"name": $issue_type},
+                "priority": {"name": $priority},
+                "labels": $labels,
+                "description": $description
+              }
+            }' > "${ISSUE_PAYLOAD_FILE}"
+
+          CREATE_RESPONSE="$(jira_api POST "${JIRA_BASE_URL}/rest/api/3/issue" "${ISSUE_PAYLOAD_FILE}")"
+          CREATED_ISSUE_KEY="$(printf '%s' "${CREATE_RESPONSE}" | jq -r '.key // empty')"
+
+          if [ -n "${CREATED_ISSUE_KEY}" ]; then
+            echo "Created Jira issue ${CREATED_ISSUE_KEY} for Dependabot PR #${GH_PR_NUMBER}."
+          else
+            echo "Created Jira issue for Dependabot PR #${GH_PR_NUMBER}."
+          fi
