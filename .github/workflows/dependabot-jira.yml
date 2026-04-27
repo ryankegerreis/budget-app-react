@@ -1,28 +1,39 @@
 name: Dependabot Jira Sync
 
 on:
+  # `pull_request_target` runs in the base repository context, which allows this
+  # workflow to use repository secrets while reacting to Dependabot PR activity.
   pull_request_target:
     types:
+      # `opened` creates the first Jira ticket, `synchronize` adds follow-up comments
+      # when Dependabot updates the same PR with new commits.
       - opened
       - synchronize
 
 permissions:
+  # Keep permissions minimal because the workflow only reads repository and PR metadata.
   contents: read
   pull-requests: read
 
 concurrency:
+  # Ensure one Jira sync job per PR number so repeated webhook events do not race.
   group: dependabot-jira-${{ github.repository }}-${{ github.event.pull_request.number }}
+  # Let an in-flight Jira sync finish instead of interrupting it mid-request.
   cancel-in-progress: false
 
 jobs:
   sync-to-jira:
+    # Ignore human-authored PRs; this workflow only mirrors Dependabot updates into Jira.
     if: github.event.pull_request.user.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
 
     steps:
       - name: Fetch Dependabot metadata
         id: dependabot-metadata
+        # This action extracts normalized metadata such as update type and package names
+        # from the Dependabot PR so the shell script does not need to parse raw markdown.
         uses: dependabot/fetch-metadata@v2
+        # Continue even if metadata lookup fails; the script has fallbacks based on PR content.
         continue-on-error: true
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -30,12 +41,14 @@ jobs:
       - name: Create or update Jira issue
         shell: bash
         env:
+          # Jira connection settings come from secrets/vars
           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
           JIRA_ISSUE_TYPE: ${{ vars.JIRA_ISSUE_TYPE }}
 
+          # GitHub event fields are copied into env vars so the shell script can use simple names.
           GH_EVENT_NAME: ${{ github.event_name }}
           GH_ACTION: ${{ github.event.action }}
           GH_REPOSITORY: ${{ github.repository }}
@@ -53,6 +66,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Fail fast if the Jira connection secrets are not configured.
           for required in JIRA_BASE_URL JIRA_EMAIL JIRA_API_TOKEN JIRA_PROJECT_KEY; do
             if [ -z "${!required:-}" ]; then
               echo "::error::Missing required secret/env: ${required}"
@@ -60,10 +74,12 @@ jobs:
             fi
           done
 
+          # Jira rejects some control characters inside JSON payloads, so sanitize any freeform text.
           sanitize_multiline() {
             printf '%s' "$1" | LC_ALL=C tr '\000-\010\013\014\016-\037' ' '
           }
 
+          # Small wrapper around curl that centralizes auth headers and HTTP error handling.
           jira_api() {
             local method="$1"
             local url="$2"
@@ -100,6 +116,7 @@ jobs:
           JIRA_BASE_URL="${JIRA_BASE_URL%/}"
           ISSUE_TYPE="${JIRA_ISSUE_TYPE:-Task}"
 
+          # Prefer Dependabot's structured dependency list, but fall back to the PR title if needed.
           DEPENDENCY_NAMES="${META_DEPENDENCY_NAMES:-}"
           if [ -z "${DEPENDENCY_NAMES}" ]; then
             DEPENDENCY_NAMES="${GH_PR_TITLE:-Dependabot dependency update}"
@@ -109,6 +126,7 @@ jobs:
           DEPENDENCY_TYPE="${META_DEPENDENCY_TYPE:-unknown}"
           UPDATE_TYPE="${META_UPDATE_TYPE:-unknown}"
 
+          # Normalize the action output into an array so later jq logic can rely on one shape.
           UPDATED_DEPENDENCIES_JSON='[]'
           if [ -n "${META_UPDATED_DEPENDENCIES_JSON:-}" ]; then
             if parsed_deps="$(printf '%s' "${META_UPDATED_DEPENDENCIES_JSON}" | jq -c '
@@ -123,11 +141,13 @@ jobs:
             fi
           fi
 
+          # Security-related bumps are promoted even if Dependabot metadata is incomplete.
           IS_SECURITY_UPDATE="false"
           if printf '%s %s' "${GH_PR_TITLE:-}" "${GH_PR_BODY:-}" | grep -Eiq '(security|vulnerab|cve-)'; then
             IS_SECURITY_UPDATE="true"
           fi
 
+          # Map update type to a Jira priority and reviewer guidance panel.
           PRIORITY="Medium"
           PANEL_TYPE="warning"
           TRIAGE_MESSAGE="🟡 Medium risk — update type unavailable. Review changelogs before merging."
@@ -156,11 +176,7 @@ jobs:
             TRIAGE_MESSAGE="🔴 High priority — this appears to be a security-related dependency update. Review and merge promptly after validation."
           fi
 
-          UPDATE_LABEL="$(printf '%s' "${UPDATE_TYPE}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+|-+$//g')"
-          if [ -z "${UPDATE_LABEL}" ]; then
-            UPDATE_LABEL="update-unknown"
-          fi
-
+          # Sanitize and trim the PR body so it fits Jira's Atlassian Document Format limits.
           PR_BODY_SAFE="$(sanitize_multiline "${GH_PR_BODY:-}")"
           if [ -z "${PR_BODY_SAFE}" ]; then
             PR_BODY_SAFE="No PR body was provided by Dependabot."
@@ -174,18 +190,18 @@ jobs:
             TRUNCATION_NOTE="Dependabot PR body was truncated from ${ORIGINAL_LEN} to ${PR_BODY_LIMIT} characters to stay within Jira ADF limits."
           fi
 
+          # Jira summaries have a hard limit, so build a readable one and cap it safely.
           SUMMARY="🤖 Dependabot [${UPDATE_TYPE}]: ${GH_REPO_NAME} — ${DEPENDENCY_NAMES} (PR #${GH_PR_NUMBER})"
           SUMMARY="$(printf '%s' "${SUMMARY}" | tr '\r\n' ' ' | sed -E 's/[[:space:]]+/ /g')"
           if [ "${#SUMMARY}" -gt 255 ]; then
             SUMMARY="${SUMMARY:0:252}..."
           fi
 
-          if [ "${IS_SECURITY_UPDATE}" = "true" ]; then
-            LABELS_JSON="$(jq -cn --arg update_label "${UPDATE_LABEL}" '["dependabot", "security", "automated", $update_label] | unique')"
-          else
-            LABELS_JSON="$(jq -cn --arg update_label "${UPDATE_LABEL}" '["dependabot", "automated", $update_label] | unique')"
-          fi
+          # Keep Jira labeling intentionally minimal so every issue carries one stable label.
+          LABELS_JSON='["dependabot"]'
 
+          # Build the Jira description as Atlassian Document Format JSON, including
+          # package details, triage guidance, and the original Dependabot PR context.
           DESCRIPTION_JSON="$(jq -n \
             --arg repo "${GH_REPOSITORY}" \
             --arg pr_url "${GH_PR_URL}" \
@@ -260,6 +276,7 @@ jobs:
                       []
                     end
                   )
+                  # Keep comment text concise when we later append synchronize-event updates.
                   + [
                     {"type": "codeBlock", "attrs": {"language": "markdown"}, "content": [text($pr_body)]},
                     heading2("Review Action"),
@@ -286,9 +303,13 @@ jobs:
             DEPENDENCY_LIST_FOR_COMMENT="${DEPENDENCY_NAMES}"
           fi
 
+          # Jira Cloud API expects basic auth using email:token encoded as base64.
           JIRA_AUTH_B64="$(printf '%s:%s' "${JIRA_EMAIL}" "${JIRA_API_TOKEN}" | base64 | tr -d '\n')"
 
-          JQL="summary ~ \"PR #${GH_PR_NUMBER}\" AND summary ~ \"${GH_REPO_NAME}\" AND labels = \"dependabot\" AND project = \"${JIRA_PROJECT_KEY}\""
+          # Search for an existing Dependabot ticket for this PR so reruns stay idempotent.
+          # With a single stable label, use the PR summary match to find the matching issue.
+          LEGACY_MATCH_JQL="summary ~ \"PR #${GH_PR_NUMBER}\" AND summary ~ \"${GH_REPO_NAME}\""
+          JQL="project = \"${JIRA_PROJECT_KEY}\" AND labels = \"dependabot\" AND (${LEGACY_MATCH_JQL})"
           ENCODED_JQL="$(jq -rn --arg q "${JQL}" '$q | @uri')"
 
           SEARCH_RESPONSE="$(jira_api GET "${JIRA_BASE_URL}/rest/api/3/search?jql=${ENCODED_JQL}&maxResults=1&fields=key,summary")"
@@ -296,6 +317,7 @@ jobs:
 
           if [ -n "${EXISTING_ISSUE_KEY}" ]; then
             if [ "${GH_ACTION}" = "synchronize" ]; then
+              # For later pushes to the same PR, add a Jira comment instead of creating a new ticket.
               COMMENT_PAYLOAD_FILE="$(mktemp)"
               jq -n \
                 --arg pr_url "${GH_PR_URL}" \
@@ -347,6 +369,7 @@ jobs:
             exit 0
           fi
 
+          # No existing Jira issue was found, so create a new one with the full payload.
           ISSUE_PAYLOAD_FILE="$(mktemp)"
           jq -n \
             --arg project_key "${JIRA_PROJECT_KEY}" \
