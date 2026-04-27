@@ -1,16 +1,40 @@
+# Dependabot config schema version.
 version: 2
+
+# Each item in `updates` tells Dependabot which package ecosystem to scan,
+# how often to check for newer versions, and how to open PRs for this repo.
 updates:
   - package-ecosystem: "npm"
+    # Scan the package.json/package-lock.json at the repository root.
     directory: "/"
+    # Open update PRs against the main development branch used by this repo.
     target-branch: "master"
     schedule:
+      # Run once a week so updates stay current without creating daily churn.
       interval: "weekly"
       day: "monday"
-    open-pull-requests-limit: 3
+    # Cap the number of simultaneously open Dependabot PRs to keep review load manageable.
+    open-pull-requests-limit: 10
+    allow:
+      # Limit routine version-update PRs to patch releases only.
+      # Security updates can still be raised for vulnerable dependencies even when
+      # the fix requires a minor or major bump.
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-patch"
     groups:
-      minor-and-patch:
+      # Bundle routine patch updates into one PR to reduce review noise.
+      patch-updates:
+        patterns:
+          # Match every npm dependency in this ecosystem.
+          - "*"
+        update-types:
+          - "patch"
+      # If multiple vulnerable dependencies can be fixed with minor bumps,
+      # combine those security fixes into a single PR.
+      security-minor-updates:
+        applies-to: security-updates
         patterns:
           - "*"
         update-types:
           - "minor"
-          - "patch"
