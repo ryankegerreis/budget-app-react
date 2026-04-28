@@ -14,14 +14,7 @@ updates:
       interval: "weekly"
       day: "monday"
     # Cap the number of simultaneously open Dependabot PRs to keep review load manageable.
-    open-pull-requests-limit: 10
-    allow:
-      # Limit routine version-update PRs to patch releases only.
-      # Security updates can still be raised for vulnerable dependencies even when
-      # the fix requires a minor or major bump.
-      - dependency-name: "*"
-        update-types:
-          - "version-update:semver-patch"
+    open-pull-requests-limit: 5
     groups:
       # Bundle routine patch updates into one PR to reduce review noise.
       patch-updates:
