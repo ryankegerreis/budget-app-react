@@ -16,12 +16,13 @@ updates:
     # Cap the number of simultaneously open Dependabot PRs to keep review load manageable.
     open-pull-requests-limit: 5
     groups:
-      # Bundle routine patch updates into one PR to reduce review noise.
-      patch-updates:
+      # Bundle routine patch and minor updates into one PR to reduce review noise.
+      routine-updates:
         patterns:
           # Match every npm dependency in this ecosystem.
           - "*"
         update-types:
+          - "minor"
           - "patch"
       # If multiple vulnerable dependencies can be fixed with minor bumps,
       # combine those security fixes into a single PR.
