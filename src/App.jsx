@@ -70,7 +70,7 @@ export default class App extends Component {
 					<Transaction
 						value={this.state.transactionValue}
 						description={this.state.transactionDesc}
-						changeHandler={e => this.changeHandler(e)}
+						changeHandler={this.changeHandler}
 						posOrNeg={this.state.posOrNeg}
 						submit={this.submitHandler}
 					/>

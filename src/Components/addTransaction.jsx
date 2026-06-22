@@ -1,13 +1,13 @@
 import React from 'react';
 
-export default function addTransaction(props) {
+export default React.memo(function addTransaction(props) {
 	return (
 		<div id='transaction-root'>
 			{/* Add a transaction */}
 			<form>
 				<select
 					id='select'
-					onChange={props.changeHandler.bind(this)}
+					onChange={props.changeHandler}
 					name='posOrNeg'
 					value={props.posOrNeg}>
 					<option value='+'>+</option>
@@ -20,7 +20,7 @@ export default function addTransaction(props) {
 						name='transactionDesc'
 						value={props.description}
 						placeholder='Description'
-						onChange={props.changeHandler.bind(this)}
+						onChange={props.changeHandler}
 						type='text'
 						required
 					/>
@@ -30,7 +30,7 @@ export default function addTransaction(props) {
 					<input
 						className='add'
 						name='transactionValue'
-						onChange={props.changeHandler.bind(this)}
+						onChange={props.changeHandler}
 						value={props.value}
 						placeholder='Amount'
 						type='number'
@@ -44,4 +44,4 @@ export default function addTransaction(props) {
 			</form>
 		</div>
 	);
-}
+});
