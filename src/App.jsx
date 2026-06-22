@@ -26,34 +26,31 @@ export default class App extends Component {
 	}
 
 	submitHandler() {
-		if (this.state.posOrNeg === '+') {
-			let newArr = this.state.incomeTransactions.concat({
-				description: this.state.transactionDesc,
-				value: this.state.transactionValue
-			});
-			this.setState({
-				...this.state,
-				incomeTransactions: newArr,
-				income: Number(this.state.income) + Number(this.state.transactionValue),
-				total: Number(this.state.total) + Number(this.state.transactionValue),
+		this.setState((state) => {
+			const transaction = {
+				description: state.transactionDesc,
+				value: state.transactionValue
+			};
+			const value = Number(state.transactionValue);
+
+			if (state.posOrNeg === '+') {
+				return {
+					incomeTransactions: [...state.incomeTransactions, transaction],
+					income: state.income + value,
+					total: state.total + value,
+					transactionDesc: '',
+					transactionValue: ''
+				};
+			}
+
+			return {
+				expenseTransactions: [...state.expenseTransactions, transaction],
+				expenses: state.expenses + value,
+				total: state.total - value,
 				transactionDesc: '',
 				transactionValue: ''
-			});
-		} else {
-			let newArr = this.state.expenseTransactions.concat({
-				description: this.state.transactionDesc,
-				value: this.state.transactionValue
-			});
-			this.setState({
-				...this.state,
-				expenseTransactions: newArr,
-				expenses:
-					Number(this.state.expenses) + Number(this.state.transactionValue),
-				total: Number(this.state.total) - Number(this.state.transactionValue),
-				transactionDesc: '',
-				transactionValue: ''
-			});
-		}
+			};
+		});
 	}
 
 	render() {
