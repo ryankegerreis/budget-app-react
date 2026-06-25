@@ -5,9 +5,9 @@ export default React.memo(function ListTransactions(props) {
 	return (
 		<div className='list'>
 			<h3 style={{ color: props.color }}>{props.name}</h3>
-			{props.transactions.map((eachObject, index) => {
+			{props.transactions.map((eachObject) => {
 				return (
-					<div key={index}>
+					<div key={eachObject.id}>
 						<Transaction
 							description={eachObject.description}
 							value={Number(eachObject.value)}
