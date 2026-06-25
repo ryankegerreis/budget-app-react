@@ -14,12 +14,12 @@ export default function App() {
 	const handleAddTransaction = useCallback((transactionData) => {
 		const { posOrNeg, description, value: transactionValue } = transactionData;
 		const value = Number(transactionValue);
-		const id = Date.now();
+		const id = crypto.randomUUID();
 
 		const transaction = {
 			id,
 			description,
-			value: transactionValue
+			value
 		};
 
 		if (posOrNeg === '+') {

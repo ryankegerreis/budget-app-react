@@ -7,12 +7,11 @@ export default React.memo(function ListTransactions(props) {
 			<h3 style={{ color: props.color }}>{props.name}</h3>
 			{props.transactions.map((eachObject) => {
 				return (
-					<div key={eachObject.id}>
-						<Transaction
-							description={eachObject.description}
-							value={Number(eachObject.value)}
-						/>
-					</div>
+					<Transaction
+						key={eachObject.id}
+						description={eachObject.description}
+						value={eachObject.value}
+					/>
 				);
 			})}
 		</div>
