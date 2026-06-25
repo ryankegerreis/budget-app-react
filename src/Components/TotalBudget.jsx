@@ -1,6 +1,6 @@
 import React from 'react';
 
-export default React.memo(function totalBudget(props) {
+export default React.memo(function TotalBudget(props) {
 	return (
 		<div id='total-budget-root'>
 			<h2>Available Budget In November</h2>

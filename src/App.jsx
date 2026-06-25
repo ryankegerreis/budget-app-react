@@ -1,90 +1,62 @@
 import './App.css';
-import React, { Component } from 'react';
-import Budget from './Components/totalBudget';
-import Transaction from './Components/addTransaction';
+import React, { useState, useCallback } from 'react';
+import Budget from './Components/TotalBudget';
+import AddTransaction from './Components/AddTransaction';
 import List from './Components/ListTransactions';
 
-export default class App extends Component {
-	constructor(props) {
-		super(props);
-		this.state = {
-			total: 0,
-			income: 0,
-			expenses: 0,
-			incomeTransactions: [],
-			expenseTransactions: [],
-			posOrNeg: '+',
-			transactionDesc: '',
-			transactionValue: ''
+export default function App() {
+	const [total, setTotal] = useState(0);
+	const [income, setIncome] = useState(0);
+	const [expenses, setExpenses] = useState(0);
+	const [incomeTransactions, setIncomeTransactions] = useState([]);
+	const [expenseTransactions, setExpenseTransactions] = useState([]);
+
+	const handleAddTransaction = useCallback((transactionData) => {
+		const { posOrNeg, description, value: transactionValue } = transactionData;
+		const value = Number(transactionValue);
+		const id = Date.now();
+
+		const transaction = {
+			id,
+			description,
+			value: transactionValue
 		};
-		this.changeHandler = this.changeHandler.bind(this);
-		this.submitHandler = this.submitHandler.bind(this);
-	}
 
-	changeHandler(e) {
-		this.setState({ [e.target.name]: e.target.value });
-	}
+		if (posOrNeg === '+') {
+			setIncomeTransactions((prev) => [...prev, transaction]);
+			setIncome((prev) => prev + value);
+			setTotal((prev) => prev + value);
+		} else {
+			setExpenseTransactions((prev) => [...prev, transaction]);
+			setExpenses((prev) => prev + value);
+			setTotal((prev) => prev - value);
+		}
+	}, []);
 
-	submitHandler() {
-		this.setState((state) => {
-			const transaction = {
-				description: state.transactionDesc,
-				value: state.transactionValue
-			};
-			const value = Number(state.transactionValue);
-
-			if (state.posOrNeg === '+') {
-				return {
-					incomeTransactions: [...state.incomeTransactions, transaction],
-					income: state.income + value,
-					total: state.total + value,
-					transactionDesc: '',
-					transactionValue: ''
-				};
-			}
-
-			return {
-				expenseTransactions: [...state.expenseTransactions, transaction],
-				expenses: state.expenses + value,
-				total: state.total - value,
-				transactionDesc: '',
-				transactionValue: ''
-			};
-		});
-	}
-
-	render() {
-		return (
-			<div id='root'>
-				<div id='section1'>
-					<Budget
-						total={this.state.total}
-						income={this.state.income}
-						expenses={this.state.expenses}
+	return (
+		<div id='root'>
+			<div id='section1'>
+				<Budget
+					total={total}
+					income={income}
+					expenses={expenses}
+				/>
+			</div>
+			<div id='section2'>
+				<AddTransaction onAdd={handleAddTransaction} />
+				<div id='list-container'>
+					<List
+						color={'#28b9b5'}
+						name='Income'
+						transactions={incomeTransactions}
 					/>
-				</div>
-				<div id='section2'>
-					<Transaction
-						value={this.state.transactionValue}
-						description={this.state.transactionDesc}
-						changeHandler={this.changeHandler}
-						posOrNeg={this.state.posOrNeg}
-						submit={this.submitHandler}
+					<List
+						color={'#ff5049'}
+						name='Expenses'
+						transactions={expenseTransactions}
 					/>
-					<div id='list-container'>
-						<List
-							color={'#28b9b5'}
-							name='Income'
-							transactions={this.state.incomeTransactions}
-						/>
-						<List
-							color={'#ff5049'}
-							name='Expenses'
-							transactions={this.state.expenseTransactions}
-						/>
-					</div>
 				</div>
 			</div>
-		);
-	}
+		</div>
+	);
 }
